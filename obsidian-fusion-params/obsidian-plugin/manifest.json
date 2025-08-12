@@ -1,0 +1,10 @@
+{
+  "id": "fusion-params-sync",
+  "name": "Fusion 360 Params Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Export parameters from fenced code blocks to JSON files usable by a Fusion 360 add-in, and pull parameters back into notes.",
+  "author": "You",
+  "authorUrl": "https://example.com",
+  "isDesktopOnly": true
+}

@@ -1,0 +1,12 @@
+{
+  "id": "FusionParamsAddIn",
+  "runOnStartup": false,
+  "version": "0.1.0",
+  "autodeskProduct": "fusion360",
+  "supportedOS": "windows|mac",
+  "parameters": {
+    "python": {
+      "entry": "FusionParamsAddIn.py"
+    }
+  }
+}

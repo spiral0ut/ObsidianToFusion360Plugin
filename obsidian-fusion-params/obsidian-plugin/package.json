@@ -1,0 +1,17 @@
+{
+  "name": "fusion-params-sync",
+  "version": "0.1.0",
+  "description": "Obsidian plugin to export Fusion 360 parameters to JSON",
+  "main": "main.js",
+  "scripts": {
+    "build": "esbuild main.ts --bundle --outfile=main.js --platform=node --external:obsidian --format=cjs",
+    "dev": "esbuild main.ts --bundle --outfile=main.js --platform=node --external:obsidian --format=cjs --watch"
+  },
+  "devDependencies": {
+    "esbuild": "^0.20.2",
+    "typescript": "^5.4.5"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "design": "DiscSanderArm",
+  "defaultUnit": "mm",
+  "parameters": [
+    {
+      "name": "arm_length",
+      "value": 230,
+      "unit": "mm",
+      "comment": "main arm length"
+    },
+    {
+      "name": "slot_width",
+      "value": 12,
+      "unit": "mm"
+    },
+    {
+      "name": "pivot_dia",
+      "value": 16,
+      "unit": "mm"
+    },
+    {
+      "name": "wall_thickness",
+      "value": 6,
+      "unit": "mm"
+    },
+    {
+      "name": "angle_deg",
+      "value": 35,
+      "unit": "deg"
+    },
+    {
+      "name": "hole_spacing",
+      "expression": "arm_length/2 - 5"
+    }
+  ]
+}
