@@ -1,9 +1,4 @@
-# Fusion 360 Params Sync (No-Build Version) — Fixed
+# Fusion 360 Params Sync (No-Build) — v0.1.3
 
-Fixes:
-- Recognizes `params:` with no value (indented list underneath).
-- Supports units with *or without* a space, e.g. `35deg` or `33 in`.
-- Shows how many parameters were exported.
-
-## Install
-Copy **fusion-params-sync** to `<YourVault>/.obsidian/plugins/fusion-params-sync/`, restart Obsidian, enable.
+Copy **fusion-params-sync** to `<YourVault>/.obsidian/plugins/fusion-params-sync/`.
+Restart Obsidian, enable the plugin.

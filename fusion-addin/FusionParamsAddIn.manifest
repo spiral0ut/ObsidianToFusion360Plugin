@@ -1,7 +1,7 @@
 {
   "id": "FusionParamsAddIn",
   "runOnStartup": false,
-  "version": "0.1.0",
+  "version": "0.1.3",
   "autodeskProduct": "fusion360",
   "supportedOS": "windows|mac",
   "parameters": {

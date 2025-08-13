@@ -1,12 +1,10 @@
-# FusionParamsAddIn.py
-# Minimal Fusion 360 add-in to import/export user parameters via JSON files.
-# Fixed: proper CommandCreatedEventHandler usage (no lambdas), and placement in SolidScriptsAddinsPanel.
 
+# FusionParamsAddIn.py (v0.1.3)
 import adsk.core, adsk.fusion, adsk.cam, traceback, json
 
 _app = None
 _ui = None
-_handlers = []  # keep references so handlers aren't GC'd
+_handlers = []
 
 def make_value_string(val, unit):
     try:
@@ -71,7 +69,7 @@ def export_params_to_json(path):
             return
         out = {
             "design": design.parentDocument.name if design.parentDocument else "ActiveDesign",
-            "defaultUnit": "",  # Fusion stores unit per param via expression string; leave blank
+            "defaultUnit": "",
             "parameters": []
         }
         for p in design.userParameters:
@@ -86,12 +84,10 @@ def export_params_to_json(path):
     except:
         _ui.messageBox('Failed to export params:\\n{}'.format(traceback.format_exc()))
 
-# ---- Event Handlers ----
-
 class ImportParamsCommandExecuteHandler(adsk.core.CommandEventHandler):
     def __init__(self):
         super().__init__()
-    def notify(self, args: adsk.core.CommandEventArgs):
+    def notify(self, args):
         try:
             fileDlg = _ui.createFileDialog()
             fileDlg.isMultiSelectEnabled = False
@@ -106,7 +102,7 @@ class ImportParamsCommandExecuteHandler(adsk.core.CommandEventHandler):
 class ExportParamsCommandExecuteHandler(adsk.core.CommandEventHandler):
     def __init__(self):
         super().__init__()
-    def notify(self, args: adsk.core.CommandEventArgs):
+    def notify(self, args):
         try:
             fileDlg = _ui.createFileDialog()
             fileDlg.isMultiSelectEnabled = False
@@ -119,30 +115,25 @@ class ExportParamsCommandExecuteHandler(adsk.core.CommandEventHandler):
             _ui.messageBox('Error (Export execute):\\n{}'.format(traceback.format_exc()))
 
 class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
-    def __init__(self, execute_handler: adsk.core.CommandEventHandler):
+    def __init__(self, execute_handler):
         super().__init__()
         self._execute_handler = execute_handler
-    def notify(self, args: adsk.core.CommandCreatedEventArgs):
+    def notify(self, args):
         try:
             cmd = args.command
             cmd.execute.add(self._execute_handler)
-            _handlers.append(self._execute_handler)  # keep alive
+            _handlers.append(self._execute_handler)
         except:
             _ui.messageBox('Error (commandCreated):\\n{}'.format(traceback.format_exc()))
 
 def add_command(cmd_id, cmd_name, cmd_desc, execute_handler_cls):
-    # Command definition
     cmdDef = _ui.commandDefinitions.itemById(cmd_id)
     if not cmdDef:
         cmdDef = _ui.commandDefinitions.addButtonDefinition(cmd_id, cmd_name, cmd_desc)
-
-    # Hook created -> then hook execute
     onExecute = execute_handler_cls()
     onCreated = CommandCreatedHandler(onExecute)
     cmdDef.commandCreated.add(onCreated)
     _handlers.extend([onExecute, onCreated])
-
-    # Put it on the standard Scripts & Add-Ins panel
     ws = _ui.workspaces.itemById('FusionSolidEnvironment')
     panel = ws.toolbarPanels.itemById('SolidScriptsAddinsPanel')
     if panel and not panel.controls.itemById(cmd_id):
@@ -153,10 +144,8 @@ def run(context):
     try:
         _app = adsk.core.Application.get()
         _ui = _app.userInterface
-
         add_command('FusionParamsImport', 'Import Params from JSON', 'Create/update user parameters from JSON', ImportParamsCommandExecuteHandler)
         add_command('FusionParamsExport', 'Export Params to JSON', 'Save current user parameters to JSON', ExportParamsCommandExecuteHandler)
-
     except:
         if _ui:
             _ui.messageBox('Add-in start failed:\\n{}'.format(traceback.format_exc()))
@@ -167,11 +156,9 @@ def stop(context):
         ws = _ui.workspaces.itemById('FusionSolidEnvironment')
         panel = ws.toolbarPanels.itemById('SolidScriptsAddinsPanel')
         for cmd_id in ['FusionParamsImport', 'FusionParamsExport']:
-            # remove control
             if panel:
                 ctrl = panel.controls.itemById(cmd_id)
                 if ctrl: ctrl.deleteMe()
-            # remove command definition
             cmd = _ui.commandDefinitions.itemById(cmd_id)
             if cmd: cmd.deleteMe()
     except:

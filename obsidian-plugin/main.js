@@ -1,5 +1,9 @@
-
 const { Plugin, Notice, PluginSettingTab, Setting } = require('obsidian');
+
+function normalizeSpaces(s) {
+  // Replace a wide range of Unicode space separators with normal spaces
+  return s.replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ');
+}
 
 function stripComment(s) {
   const hash = s.indexOf('#');
@@ -8,6 +12,7 @@ function stripComment(s) {
 }
 
 function parseBlock(src) {
+  src = normalizeSpaces(src);
   const lines = src.split(/\r?\n/);
   let part = null;
   let units = null;
@@ -15,30 +20,31 @@ function parseBlock(src) {
   let inParams = false;
 
   for (let raw of lines) {
-    let line = stripComment(raw).trimEnd();
-    if (!line.trim()) continue;
+    let line = stripComment(raw).replace(/\t/g, '    ').trimEnd();
+    // skip empty (after trimming regular and unicode spaces on both sides for check)
+    if (normalizeSpaces(line).trim().length === 0) continue;
 
     if (!inParams) {
-      const mKV = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.*?)\s*$/);
-      if (mKV) {
-        const key = mKV[1];
-        const val = mKV[2] ?? '';
-        if (key === 'params') {
-          inParams = true;
-          continue;
-        } else if (key === 'part') {
-          part = (val || '').replace(/^["']|["']$/g, '');
-        } else if (key === 'units') {
-          units = (val || '').replace(/^["']|["']$/g, '');
-        }
+      const idx = line.indexOf(':');
+      if (idx === -1) continue;
+      const key = normalizeSpaces(line.slice(0, idx)).trim();
+      const val = normalizeSpaces(line.slice(idx + 1)).trim();
+      if (key === 'params') {
+        inParams = true;
+        continue;
+      } else if (key === 'part') {
+        part = val.replace(/^["']|["']$/g, '');
+      } else if (key === 'units') {
+        units = val.replace(/^["']|["']$/g, '');
       }
     } else {
-      const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(.+)\s*$/);
-      if (m) {
-        const name = m[1];
-        const val = m[2].trim();
-        params[name] = val.replace(/^["']|["']$/g, '');
-      }
+      // inside params: split on first colon
+      const idx = line.indexOf(':');
+      if (idx === -1) continue;
+      const name = normalizeSpaces(line.slice(0, idx)).trim();
+      const val = normalizeSpaces(line.slice(idx + 1)).trim();
+      if (!name) continue;
+      params[name] = val.replace(/^["']|["']$/g, '');
     }
   }
 
@@ -57,6 +63,7 @@ function toJson(parsed, fallbackUnit) {
       out.parameters.push({ name, value: asNum, unit: defaultUnit });
       continue;
     }
+    // match "12 mm" or "12mm" or "12.5 in" or "35deg"
     const mUnit = raw.match(/^([0-9.+\-/* ()]+)\s*([a-zA-Z]+)$/);
     if (mUnit) {
       const num = Number(mUnit[1].trim());
