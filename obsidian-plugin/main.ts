@@ -28,14 +28,11 @@ function normalizeParams(parsed: any, fallbackUnit: string): { design: string; d
 
   for (const [key, val] of Object.entries(parsed.params)) {
     if (typeof val === 'string') {
-      // Could be "12", "12 mm", or an expression like "arm_length/2 - 5"
       const trimmed = val.trim();
-      // If it parses as a number, treat as number (unitless or default unit); else as expression
       const numeric = Number(trimmed);
       if (!isNaN(numeric)) {
         parameters.push({ name: key, value: numeric, unit: defaultUnit });
       } else {
-        // check if it ends with a unit (simple heuristic: last token alpha-only)
         const m = trimmed.match(/^([0-9.+-/* ()]+)\s+([a-zA-Z]+)$/);
         if (m) {
           const value = m[1].trim();
@@ -53,7 +50,6 @@ function normalizeParams(parsed: any, fallbackUnit: string): { design: string; d
     } else if (typeof val === 'number') {
       parameters.push({ name: key, value: val, unit: defaultUnit });
     } else if (typeof val === 'object' && val !== null) {
-      // support object with fields { value, unit, expression, comment }
       const name = key;
       if ('expression' in val) {
         parameters.push({ name, expression: String((val as any).expression), comment: (val as any).comment });
@@ -78,7 +74,6 @@ export default class FusionParamsPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
 
-    // Register fenced code block: ```fusion-params
     this.registerMarkdownCodeBlockProcessor('fusion-params', async (src, el, ctx) => {
       try {
         const parsed = yaml.load(src) as ParsedBlock;
@@ -94,7 +89,6 @@ export default class FusionParamsPlugin extends Plugin {
       }
     });
 
-    // Command to (re)export from current file (will process all code blocks in the file)
     this.addCommand({
       id: 'export-fusion-params-from-file',
       name: 'Export Fusion Params from Current File',
