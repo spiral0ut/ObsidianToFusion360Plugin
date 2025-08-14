@@ -1,9 +1,9 @@
 {
   "id": "fusion-params-sync",
   "name": "Fusion 360 Params Sync",
-  "version": "0.1.4",
+  "version": "0.2.1",
   "minAppVersion": "1.2.0",
-  "description": "Export Fusion 360 user parameters from fenced code blocks; robust parsing with Unicode space normalization.",
+  "description": "Fusion 360 parameter sync with editable table, Enter-to-save, and fixed output folder.",
   "author": "You",
   "isDesktopOnly": true
 }

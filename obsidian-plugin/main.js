@@ -1,57 +1,47 @@
-const { Plugin, Notice, PluginSettingTab, Setting } = require('obsidian');
 
-function normalizeSpaces(s) {
-  // Replace a wide range of Unicode space separators with normal spaces
-  return s.replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ');
+const { Plugin, Notice, PluginSettingTab, Setting, setIcon } = require('obsidian');
+
+function normalizeSpaces(s) { return s.replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' '); }
+function stripComment(s) { const hash = s.indexOf('#'); return hash >= 0 ? s.slice(0, hash) : s; }
+function hashString(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h) + s.charCodeAt(i); return (h >>> 0).toString(16); }
+function joinVaultPath(folder, file) {
+  folder = (folder || '').replace(/^[\/\\]+|[\/\\]+$/g, '');
+  file = (file || '').replace(/^[\/\\]+/g, '');
+  return folder ? `${folder}/${file}` : file;
 }
+const RECENT_WINDOW_MS = 4000;
+const recentExports = new Map();
+let writebackGuard = false;
 
-function stripComment(s) {
-  const hash = s.indexOf('#');
-  if (hash >= 0) return s.slice(0, hash);
-  return s;
-}
-
+// --- parsing ---
 function parseBlock(src) {
   src = normalizeSpaces(src);
   const lines = src.split(/\r?\n/);
-  let part = null;
-  let units = null;
+  let part = null, units = null, inParams = false;
   const params = {};
-  let inParams = false;
-
   for (let raw of lines) {
     let line = stripComment(raw).replace(/\t/g, '    ').trimEnd();
-    // skip empty (after trimming regular and unicode spaces on both sides for check)
     if (normalizeSpaces(line).trim().length === 0) continue;
-
     if (!inParams) {
       const idx = line.indexOf(':');
       if (idx === -1) continue;
       const key = normalizeSpaces(line.slice(0, idx)).trim();
       const val = normalizeSpaces(line.slice(idx + 1)).trim();
-      if (key === 'params') {
-        inParams = true;
-        continue;
-      } else if (key === 'part') {
-        part = val.replace(/^["']|["']$/g, '');
-      } else if (key === 'units') {
-        units = val.replace(/^["']|["']$/g, '');
-      }
+      if (key === 'params') { inParams = true; continue; }
+      if (key === 'part') part = val.replace(/^["']|["']$/g, '');
+      else if (key === 'units') units = val.replace(/^["']|["']$/g, '');
     } else {
-      // inside params: split on first colon
       const idx = line.indexOf(':');
       if (idx === -1) continue;
       const name = normalizeSpaces(line.slice(0, idx)).trim();
-      const val = normalizeSpaces(line.slice(idx + 1)).trim();
+      const val  = normalizeSpaces(line.slice(idx + 1)).trim();
       if (!name) continue;
       params[name] = val.replace(/^["']|["']$/g, '');
     }
   }
-
   if (!part) throw new Error("Missing 'part'");
   return { part, units, params };
 }
-
 function toJson(parsed, fallbackUnit) {
   const defaultUnit = parsed.units || fallbackUnit || "";
   const out = { design: parsed.part, defaultUnit, parameters: [] };
@@ -59,119 +49,304 @@ function toJson(parsed, fallbackUnit) {
     const raw = String(raw0);
     if (raw === '') continue;
     const asNum = Number(raw);
-    if (!Number.isNaN(asNum)) {
-      out.parameters.push({ name, value: asNum, unit: defaultUnit });
-      continue;
-    }
-    // match "12 mm" or "12mm" or "12.5 in" or "35deg"
+    if (!Number.isNaN(asNum)) { out.parameters.push({ name, value: asNum, unit: defaultUnit, _explicitUnit: false, _raw: raw }); continue; }
     const mUnit = raw.match(/^([0-9.+\-/* ()]+)\s*([a-zA-Z]+)$/);
     if (mUnit) {
-      const num = Number(mUnit[1].trim());
-      const unit = mUnit[2].trim();
-      if (!Number.isNaN(num)) {
-        out.parameters.push({ name, value: num, unit });
-        continue;
-      }
+      const num = Number(mUnit[1].trim()), unit = mUnit[2].trim();
+      if (!Number.isNaN(num)) { out.parameters.push({ name, value: num, unit, _explicitUnit: true, _raw: raw }); continue; }
     }
-    out.parameters.push({ name, expression: raw });
+    out.parameters.push({ name, expression: raw, _raw: raw });
   }
   return out;
 }
-
-class FusionParamsSettingTab extends PluginSettingTab {
-  constructor(app, plugin) {
-    super(app, plugin);
-    this.plugin = plugin;
+function fromJsonToBlock(json) {
+  const lines = [];
+  lines.push("```fusion-params");
+  lines.push(`part: ${json.design}`);
+  if (json.defaultUnit && json.defaultUnit.trim()) lines.push(`units: ${json.defaultUnit}`);
+  lines.push("params:");
+  for (const p of json.parameters) {
+    if ('expression' in p) lines.push(`  ${p.name}: ${p.expression}`);
+    else if (p.unit && p._explicitUnit) lines.push(`  ${p.name}: ${p.value} ${p.unit}`);
+    else lines.push(`  ${p.name}: ${p.value}`);
   }
+  lines.push("```");
+  return lines.join("\n");
+}
+
+// --- file IO ---
+async function readSafe(adapter, path) { try { return await adapter.read(path); } catch { return null; } }
+async function writeIfChanged(adapter, path, content) {
+  const existing = await readSafe(adapter, path);
+  if (existing && existing.trim() === content.trim()) return false;
+  await adapter.write(path, content);
+  return true;
+}
+function safeReplaceSection(fullText, lineStart, lineEnd, replacement) {
+  const lines = fullText.split(/\r?\n/);
+  const before = lines.slice(0, lineStart).join('\n');
+  const after  = lines.slice(lineEnd + 1).join('\n');
+  let glue1 = (before && !before.endsWith('\n')) ? '\n' : '';
+  let glue2 = (!replacement.endsWith('\n')) ? '\n' : '';
+  let glue3 = (after && !after.startsWith('\n')) ? '\n' : '';
+  return `${before}${glue1}${replacement}${glue2}${glue3}${after}`;
+}
+
+// --- settings ---
+class FusionParamsSettingTab extends PluginSettingTab {
+  constructor(app, plugin) { super(app, plugin); this.plugin = plugin; }
   display() {
-    const { containerEl } = this;
-    containerEl.empty();
-
-    new Setting(containerEl)
-      .setName('Output folder')
-      .setDesc('Where to write JSON files (relative to vault root).')
-      .addText(t => t
-        .setPlaceholder('Params')
-        .setValue(this.plugin.settings.outputFolder)
-        .onChange(async (value) => {
-          this.plugin.settings.outputFolder = value || "Params";
-          await this.plugin.saveSettings();
-        }));
-
-    new Setting(containerEl)
-      .setName('Default unit')
-      .setDesc('Used when a numeric value has no explicit unit (e.g., mm).')
-      .addText(t => t
-        .setPlaceholder('mm')
-        .setValue(this.plugin.settings.defaultUnit)
-        .onChange(async (value) => {
-          this.plugin.settings.defaultUnit = value || "mm";
-          await this.plugin.saveSettings();
-        }));
+    const { containerEl } = this; containerEl.empty();
+    new Setting(containerEl).setName('Output folder')
+      .setDesc('Folder (relative to vault root) where JSON files are written, regardless of note location.')
+      .addText(t=>t.setPlaceholder('Params').setValue(this.plugin.settings.outputFolder)
+        .onChange(async v=>{ this.plugin.settings.outputFolder = (v||"Params"); await this.plugin.saveSettings(); }));
+    new Setting(containerEl).setName('Default unit')
+      .setDesc('Used when numeric value has no explicit unit (e.g., mm).')
+      .addText(t=>t.setPlaceholder('mm').setValue(this.plugin.settings.defaultUnit)
+        .onChange(async v=>{ this.plugin.settings.defaultUnit = v || "mm"; await this.plugin.saveSettings(); }));
+    new Setting(containerEl).setName('Always notify')
+      .setDesc('Show a popup for status messages. Default: off.')
+      .addToggle(t=>t.setValue(this.plugin.settings.alwaysNotify)
+        .onChange(async v=>{ this.plugin.settings.alwaysNotify=v; await this.plugin.saveSettings(); }));
+    new Setting(containerEl).setName('Sort parameters A→Z')
+      .setDesc('Order table by name.')
+      .addToggle(t=>t.setValue(this.plugin.settings.sortAZ)
+        .onChange(async v=>{ this.plugin.settings.sortAZ=v; await this.plugin.saveSettings(); }));
+    new Setting(containerEl).setName('Show units column')
+      .setDesc('Include a separate Unit column in the table.')
+      .addToggle(t=>t.setValue(this.plugin.settings.showUnits)
+        .onChange(async v=>{ this.plugin.settings.showUnits=v; await this.plugin.saveSettings(); }));
   }
 }
 
+// --- styles ---
+function injectStyles() {
+  if (document.head.querySelector('style[data-fusion-params-style]')) return;
+  const css = `
+  .fusion-params-status { margin-top: .25rem; font-size: .9em; opacity: .9; }
+  .fusion-params-table-container { margin-top: .5rem; }
+  .fusion-params-title { font-weight: 600; margin: .25rem 0 .5rem; }
+  table.fusion-params-table { width: 100%; border-collapse: collapse; }
+  table.fusion-params-table th, table.fusion-params-table td {
+    border: 1px solid var(--background-modifier-border); padding: 6px 8px; vertical-align: middle;
+  }
+  table.fusion-params-table th { text-align: left; }
+  table.fusion-params-table td input { width: 100%; box-sizing: border-box; }
+  table.fusion-params-table td .row-delete { opacity: 0; transition: opacity .15s ease; cursor: pointer; }
+  table.fusion-params-table tr:hover td .row-delete { opacity: .8; }
+  .fusion-params-buttons { margin-top: .4rem; display: flex; gap: .5rem; }
+  .fusion-params-unit-placeholder { color: var(--text-muted); }
+  `;
+  const style = document.createElement('style');
+  style.setAttribute('data-fusion-params-style', 'true');
+  style.textContent = css; document.head.appendChild(style);
+}
+
+// --- table render ---
+function makeSortedParams(json, sortAZ) {
+  const arr = json.parameters.slice();
+  if (sortAZ) arr.sort((a,b)=>a.name.localeCompare(b.name));
+  return arr;
+}
+function renderTableEditable(el, json, { sortAZ, showUnits }, onCommit) {
+  const params = makeSortedParams(json, sortAZ);
+  const container = el.createEl('div', { cls: 'fusion-params-table-container' });
+  const title = container.createEl('div', { text: `Parameters for ${json.design} (${params.length})` });
+  title.addClass('fusion-params-title');
+  const table = container.createEl('table', { cls: 'fusion-params-table' });
+  const thead = table.createEl('thead');
+  const hdr = thead.createEl('tr');
+  hdr.createEl('th', { text: 'Name' });
+  hdr.createEl('th', { text: 'Value / Expression' });
+  if (showUnits) hdr.createEl('th', { text: 'Unit' });
+  hdr.createEl('th'); // delete column
+  const tbody = table.createEl('tbody');
+
+  const commit = () => onCommit(readFromTable());
+
+  function readFromTable() {
+    const out = [];
+    for (const tr of tbody.children) {
+      const name = tr.querySelector('input[data-key="name"]').value.trim();
+      const val  = tr.querySelector('input[data-key="value"]').value.trim();
+      const unitEl = showUnits ? tr.querySelector('input[data-key="unit"]') : null;
+      const unit = unitEl ? unitEl.value.trim() : '';
+      if (!name || val === '') continue;
+      const numOnly = /^[0-9.+\-/* ()]+$/.test(val) && !/[a-zA-Z]/.test(val);
+      const asNum = Number(val);
+      if (numOnly && !Number.isNaN(asNum)) {
+        if (unit) out.push({ name, value: asNum, unit, _explicitUnit: true });
+        else out.push({ name, value: asNum, _explicitUnit: false });
+      } else {
+        out.push({ name, expression: val });
+      }
+    }
+    return out;
+  }
+
+  function addRow(p) {
+    const tr = tbody.createEl('tr');
+    const tdName = tr.createEl('td'); const tdVal = tr.createEl('td');
+    const nameInput = tdName.createEl('input', { type:'text', value: p.name || '' });
+    nameInput.setAttr('data-key','name');
+
+    const valStr = ('expression' in p) ? p.expression : (p.value ?? '');
+    const valInput = tdVal.createEl('input', { type:'text', value: String(valStr) });
+    valInput.setAttr('data-key','value');
+
+    let unitInput = null;
+    if (showUnits) {
+      const tdUnit = tr.createEl('td');
+      const showUnitText = ('expression' in p) ? '' : (p._explicitUnit ? (p.unit||'') : '');
+      unitInput = tdUnit.createEl('input', { type:'text', value: showUnitText });
+      unitInput.setAttr('data-key','unit');
+      if (!p._explicitUnit && !('expression' in p)) {
+        unitInput.setAttr('placeholder', `default (${json.defaultUnit||''})`);
+        unitInput.addClass('fusion-params-unit-placeholder');
+      }
+    }
+
+    const tdDel = tr.createEl('td');
+    const delBtn = tdDel.createEl('div', { cls: 'row-delete' });
+    setIcon(delBtn, 'trash');
+    delBtn.addEventListener('click', () => {
+      tr.remove();
+      commit();
+    });
+
+    // Save on Enter only
+    for (const input of [nameInput, valInput, unitInput].filter(Boolean)) {
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+      });
+    }
+  }
+
+  for (const p of params) addRow(p);
+
+  const btnRow = container.createEl('div', { cls: 'fusion-params-buttons' });
+  const addBtn = btnRow.createEl('button', { text: 'Add parameter' });
+  addBtn.addEventListener('click', () => addRow({ name:'', value:'', _explicitUnit: false }));
+  const copyBtn = btnRow.createEl('button', { text: 'Copy CSV' });
+  copyBtn.addEventListener('click', async () => {
+    const rows = [['Name','Value','Unit']];
+    for (const tr of tbody.children) {
+      const name = tr.querySelector('input[data-key="name"]').value;
+      const val  = tr.querySelector('input[data-key="value"]').value;
+      const unit = showUnits ? tr.querySelector('input[data-key="unit"]').value : '';
+      rows.push([name,val,unit]);
+    }
+    const csv = rows.map(r => r.map(x => /[",\n]/.test(x) ? `"${x.replace(/"/g,'""')}"` : x).join(',')).join('\n');
+    try { await navigator.clipboard.writeText(csv); new Notice('CSV copied'); } catch { new Notice('Copy failed'); }
+  });
+
+  return { readFromTable };
+}
+
+// --- plugin ---
 module.exports = class FusionParamsPlugin extends Plugin {
   async onload() {
-    this.settings = Object.assign({}, { outputFolder: "Params", defaultUnit: "mm" }, await this.loadData());
+    this.settings = Object.assign({}, {
+      outputFolder: "Params",
+      defaultUnit: "mm",
+      alwaysNotify: false,
+      sortAZ: true,
+      showUnits: true
+    }, await this.loadData());
 
+    injectStyles();
+
+    // Template command + context menu
+    const insertTemplate = async (editor, view) => {
+      const file = this.app.workspace.getActiveFile();
+      const base = file ? (file.basename || 'Part') : 'Part';
+      const tpl = [
+        '```fusion-params',
+        `part: ${base}`,
+        `units: ${this.settings.defaultUnit}`,
+        'params:',
+        '  length: 100',
+        '  width:  50',
+        '  height: 25',
+        '  hole_dia: 8 mm',
+        '  angle_deg: 30deg',
+        '```'
+      ].join('\n');
+      const pos = editor.getCursor();
+      editor.replaceRange(tpl + '\n', pos);
+    };
+    this.addCommand({ id: 'insert-fusion-params-template', name: 'Insert Fusion Params template', editorCallback: insertTemplate });
+    this.registerEvent(this.app.workspace.on('editor-menu', (menu, editor, view) => {
+      menu.addItem((item) => item.setTitle('Insert Fusion Params template').setIcon('plus').onClick(()=>insertTemplate(editor, view)));
+    }));
+
+    // Processor
     this.registerMarkdownCodeBlockProcessor('fusion-params', async (src, el, ctx) => {
       try {
+        while (el.firstChild) el.removeChild(el.firstChild);
+
         const parsed = parseBlock(src);
         const json = toJson(parsed, this.settings.defaultUnit);
-        const outPath = `${this.settings.outputFolder}/${json.design}.json`;
+
+        // File JSON (strip UI flags)
+        const fileJson = {
+          design: json.design,
+          defaultUnit: json.defaultUnit,
+          parameters: json.parameters.map(p => ('expression' in p) ? ({ name: p.name, expression: p.expression }) : ({ name: p.name, value: p.value, unit: p.unit }))
+        };
+        const outRelPath = joinVaultPath(this.settings.outputFolder, `${json.design}.json`);
         await this.app.vault.adapter.mkdir(this.settings.outputFolder).catch(() => {});
-        await this.app.vault.adapter.write(outPath, JSON.stringify(json, null, 2));
-        el.createEl('pre', { text: `Exported ${json.parameters.length} Fusion param(s) → ${outPath}` });
-        new Notice(`Exported ${json.parameters.length} param(s): ${outPath}`);
+        const pretty = JSON.stringify(fileJson, null, 2);
+        const changed = await writeIfChanged(this.app.vault.adapter, outRelPath, pretty);
+
+        const status = el.createEl('div'); status.addClass('fusion-params-status');
+        const now = Date.now();
+        const recent = recentExports.get(outRelPath);
+        let text = '';
+        if (changed) {
+          recentExports.set(outRelPath, { hash: hashString(pretty), t: now });
+          text = `Updated → ${outRelPath}`;
+          setTimeout(() => { status.setText(`No changes pending → ${outRelPath}`); }, 3000);
+        } else if (recent && (now - recent.t) < RECENT_WINDOW_MS) {
+          text = `Updated just now → ${outRelPath}`;
+          setTimeout(() => { status.setText(`No changes pending → ${outRelPath}`); }, 2500);
+        } else {
+          text = `No changes pending → ${outRelPath}`;
+        }
+        status.setText(text);
+        if (this.settings.alwaysNotify) new Notice(text);
+
+        // Two-way writeback on Enter only
+        const section = ctx.getSectionInfo(el);
+        const file = this.app.workspace.getActiveFile();
+        const applyWriteback = async (newParams) => {
+          if (!file || !section) return;
+          const updatedJson = { ...json, parameters: newParams };
+          const newBlock = fromJsonToBlock(updatedJson);
+          const data = await this.app.vault.read(file);
+          const next = safeReplaceSection(data, section.lineStart, section.lineEnd, newBlock);
+          if (next.trim() === data.trim()) return;
+          writebackGuard = true;
+          await this.app.vault.modify(file, next);
+          setTimeout(()=>{ writebackGuard = false; }, 400);
+        };
+
+        renderTableEditable(el, json, { sortAZ: this.settings.sortAZ, showUnits: this.settings.showUnits }, applyWriteback);
+
       } catch (e) {
         console.error(e);
-        new Notice(`Failed to export fusion-params: ${e.message || e}`);
+        new Notice(`Failed to process fusion-params: ${e.message || e}`);
       }
     });
 
-    this.addCommand({
-      id: 'export-fusion-params-from-file',
-      name: 'Export Fusion Params from Current File',
-      checkCallback: (checking) => {
-        const file = this.app.workspace.getActiveFile();
-        if (!file) return false;
-        if (!checking) this.exportFromFile(file);
-        return true;
-      }
-    });
+    this.registerEvent(this.app.vault.on('modify', (file) => {
+      if (writebackGuard) { /* ignore own writes */ }
+    }));
 
     this.addSettingTab(new FusionParamsSettingTab(this.app, this));
   }
 
-  async exportFromFile(file) {
-    const content = await this.app.vault.read(file);
-    const re = /```fusion-params([\s\S]*?)```/g;
-    const blocks = Array.from(content.matchAll(re));
-    if (!blocks.length) {
-      new Notice("No ```fusion-params code blocks found in this file.");
-      return;
-    }
-    let total = 0;
-    for (const m of blocks) {
-      const src = m[1];
-      try {
-        const parsed = parseBlock(src);
-        const json = toJson(parsed, this.settings.defaultUnit);
-        const outPath = `${this.settings.outputFolder}/${json.design}.json`;
-        await this.app.vault.adapter.mkdir(this.settings.outputFolder).catch(() => {});
-        await this.app.vault.adapter.write(outPath, JSON.stringify(json, null, 2));
-        total += json.parameters.length;
-      } catch (e) {
-        new Notice(`Failed to export one block: ${e.message || e}`);
-      }
-    }
-    new Notice(`Exported ${total} parameter(s) across fusion-params block(s).`);
-  }
-
   async onunload() {}
-
-  async saveSettings() {
-    await this.saveData(this.settings);
-  }
+  async saveSettings() { await this.saveData(this.settings); }
 };
