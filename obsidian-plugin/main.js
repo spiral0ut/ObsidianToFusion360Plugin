@@ -11,7 +11,6 @@ function joinVaultPath(folder, file) {
 }
 const RECENT_WINDOW_MS = 4000;
 const recentExports = new Map();
-let writebackGuard = false;
 
 // --- parsing ---
 function parseBlock(src) {
@@ -124,8 +123,12 @@ class FusionParamsSettingTab extends PluginSettingTab {
 function injectStyles() {
   if (document.head.querySelector('style[data-fusion-params-style]')) return;
   const css = `
+  .fusion-params-toolbar { display: flex; align-items: center; gap: .5rem; margin: .25rem 0 .25rem; }
+  .fusion-params-toolbar .icon-btn { width: 26px; height: 26px; border: 1px solid var(--background-modifier-border);
+    border-radius: 6px; display: flex; align-items: center; justify-content: center; cursor: pointer; }
+  .fusion-params-toolbar .icon-btn:hover { background: var(--background-modifier-hover); }
   .fusion-params-status { margin-top: .25rem; font-size: .9em; opacity: .9; }
-  .fusion-params-table-container { margin-top: .5rem; }
+  .fusion-params-table-container { margin-top: .25rem; }
   .fusion-params-title { font-weight: 600; margin: .25rem 0 .5rem; }
   table.fusion-params-table { width: 100%; border-collapse: collapse; }
   table.fusion-params-table th, table.fusion-params-table td {
@@ -133,9 +136,10 @@ function injectStyles() {
   }
   table.fusion-params-table th { text-align: left; }
   table.fusion-params-table td input { width: 100%; box-sizing: border-box; }
-  table.fusion-params-table td .row-delete { opacity: 0; transition: opacity .15s ease; cursor: pointer; }
-  table.fusion-params-table tr:hover td .row-delete { opacity: .8; }
-  .fusion-params-buttons { margin-top: .4rem; display: flex; gap: .5rem; }
+  table.fusion-params-table td .row-action, 
+  table.fusion-params-table td .row-action-left { opacity: 0; transition: opacity .15s ease; cursor: pointer; margin-left: .25rem; }
+  table.fusion-params-table tr:hover td .row-action,
+  table.fusion-params-table tr:hover td .row-action-left { opacity: .9; }
   .fusion-params-unit-placeholder { color: var(--text-muted); }
   `;
   const style = document.createElement('style');
@@ -151,16 +155,26 @@ function makeSortedParams(json, sortAZ) {
 }
 function renderTableEditable(el, json, { sortAZ, showUnits }, onCommit) {
   const params = makeSortedParams(json, sortAZ);
+
+  // toolbar with + on left and CSV on right
+  const toolbar = el.createEl('div', { cls: 'fusion-params-toolbar' });
+  const addBtn = toolbar.createEl('div', { cls: 'icon-btn', attr: { 'aria-label':'Add parameter to end' } });
+  setIcon(addBtn, 'plus');
+  const spacer = toolbar.createEl('div', { style: 'flex:1' });
+  const csvBtn = toolbar.createEl('div', { cls: 'icon-btn', attr: { 'aria-label':'Copy CSV' } });
+  setIcon(csvBtn, 'clipboard');
+
   const container = el.createEl('div', { cls: 'fusion-params-table-container' });
   const title = container.createEl('div', { text: `Parameters for ${json.design} (${params.length})` });
   title.addClass('fusion-params-title');
   const table = container.createEl('table', { cls: 'fusion-params-table' });
   const thead = table.createEl('thead');
   const hdr = thead.createEl('tr');
+  hdr.createEl('th', { text: '' }); // left-side insert
   hdr.createEl('th', { text: 'Name' });
   hdr.createEl('th', { text: 'Value / Expression' });
   if (showUnits) hdr.createEl('th', { text: 'Unit' });
-  hdr.createEl('th'); // delete column
+  hdr.createEl('th', { text: '' }); // right-side actions
   const tbody = table.createEl('tbody');
 
   const commit = () => onCommit(readFromTable());
@@ -185,51 +199,112 @@ function renderTableEditable(el, json, { sortAZ, showUnits }, onCommit) {
     return out;
   }
 
-  function addRow(p) {
-    const tr = tbody.createEl('tr');
+  function isRowComplete(tr) {
+    const name = tr.querySelector('input[data-key="name"]').value.trim();
+    const val  = tr.querySelector('input[data-key="value"]').value.trim();
+    return name !== '' && val !== ''; // unit optional
+  }
+  function isRowEmpty(tr) {
+    const name = tr.querySelector('input[data-key="name"]').value.trim();
+    const val  = tr.querySelector('input[data-key="value"]').value.trim();
+    const unit = showUnits ? tr.querySelector('input[data-key="unit"]').value.trim() : '';
+    return name === '' && val === '' && (!showUnits || unit === '');
+  }
+
+  function createRowElements(p) {
+    const tr = document.createElement('tr');
+
+    // left insert cell
+    const tdIns = tr.createEl('td');
+    const plusLeft = tdIns.createEl('span', { cls: 'row-action-left', attr: { 'aria-label':'Insert row below' } });
+    setIcon(plusLeft, 'plus');
+
+    // name / value / unit
     const tdName = tr.createEl('td'); const tdVal = tr.createEl('td');
-    const nameInput = tdName.createEl('input', { type:'text', value: p.name || '' });
+    const nameInput = tdName.createEl('input', { type:'text', value: p?.name || '' });
     nameInput.setAttr('data-key','name');
 
-    const valStr = ('expression' in p) ? p.expression : (p.value ?? '');
+    const valStr = (p && ('expression' in p)) ? p.expression : (p ? (p.value ?? '') : '');
     const valInput = tdVal.createEl('input', { type:'text', value: String(valStr) });
     valInput.setAttr('data-key','value');
 
     let unitInput = null;
     if (showUnits) {
       const tdUnit = tr.createEl('td');
-      const showUnitText = ('expression' in p) ? '' : (p._explicitUnit ? (p.unit||'') : '');
+      const showUnitText = (p && ('expression' in p)) ? '' : (p && p._explicitUnit ? (p.unit||'') : '');
       unitInput = tdUnit.createEl('input', { type:'text', value: showUnitText });
       unitInput.setAttr('data-key','unit');
-      if (!p._explicitUnit && !('expression' in p)) {
+      if (!(p && p._explicitUnit) && !(p && ('expression' in p))) {
         unitInput.setAttr('placeholder', `default (${json.defaultUnit||''})`);
         unitInput.addClass('fusion-params-unit-placeholder');
       }
     }
 
-    const tdDel = tr.createEl('td');
-    const delBtn = tdDel.createEl('div', { cls: 'row-delete' });
+    // right actions
+    const tdActions = tr.createEl('td');
+    const okBtn = tdActions.createEl('span', { cls: 'row-action', attr: { 'aria-label':'Save row' } });
+    setIcon(okBtn, 'check');
+    const delBtn = tdActions.createEl('span', { cls: 'row-action', attr: { 'aria-label':'Delete row' } });
     setIcon(delBtn, 'trash');
-    delBtn.addEventListener('click', () => {
-      tr.remove();
-      commit();
-    });
 
-    // Save on Enter only
-    for (const input of [nameInput, valInput, unitInput].filter(Boolean)) {
-      input.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
-      });
-    }
+    return { tr, nameInput, valInput, unitInput, okBtn, delBtn, plusLeft };
   }
 
-  for (const p of params) addRow(p);
+  function insertRowAfter(refTr, p=null, focusName=true, ephemeral=true) {
+    const { tr, nameInput, valInput, unitInput, okBtn, delBtn, plusLeft } = createRowElements(p);
+    tr.setAttr('data-ephemeral', ephemeral ? '1' : '0');
 
-  const btnRow = container.createEl('div', { cls: 'fusion-params-buttons' });
-  const addBtn = btnRow.createEl('button', { text: 'Add parameter' });
-  addBtn.addEventListener('click', () => addRow({ name:'', value:'', _explicitUnit: false }));
-  const copyBtn = btnRow.createEl('button', { text: 'Copy CSV' });
-  copyBtn.addEventListener('click', async () => {
+    // handlers
+    okBtn.addEventListener('click', () => { commit(); });
+    delBtn.addEventListener('click', () => { tr.remove(); commit(); });
+    plusLeft.addEventListener('click', () => {
+      const newTr = insertRowAfter(tr, null, true, true);
+      newTr.scrollIntoView({ block: 'nearest' });
+    });
+
+    const lastInput = (showUnits && unitInput) ? unitInput : valInput;
+    for (const input of [nameInput, valInput, unitInput].filter(Boolean)) {
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          if (isRowComplete(tr)) {
+            ev.preventDefault();
+            commit(); // finalize this row
+            const newTr = insertRowAfter(tr, null, true, true); // add a blank row *below*
+            newTr.scrollIntoView({ block: 'nearest' });
+          }
+        } else if (ev.key === 'Tab') {
+          if (ev.target === lastInput && isRowComplete(tr)) {
+            setTimeout(()=>commit(), 0); // save only
+          }
+        }
+      });
+    }
+
+    // remove ephemeral if left empty
+    tr.addEventListener('focusout', () => {
+      setTimeout(() => {
+        if (tr.getAttr('data-ephemeral') === '1' && isRowEmpty(tr) && !tr.contains(document.activeElement)) {
+          tr.remove();
+        }
+      }, 10);
+    });
+
+    // insert into DOM
+    if (refTr && refTr.nextSibling) tbody.insertBefore(tr, refTr.nextSibling);
+    else if (refTr && !refTr.nextSibling) tbody.appendChild(tr);
+    else tbody.appendChild(tr);
+
+    if (focusName) nameInput.focus();
+    return tr;
+  }
+
+  // seed rows from JSON
+  let lastTr = null;
+  for (const p of params) lastTr = insertRowAfter(lastTr, p, false, false);
+
+  // toolbar hooks
+  addBtn.addEventListener('click', () => insertRowAfter(tbody.lastElementChild, null, true, true));
+  csvBtn.addEventListener('click', async () => {
     const rows = [['Name','Value','Unit']];
     for (const tr of tbody.children) {
       const name = tr.querySelector('input[data-key="name"]').value;
@@ -240,8 +315,6 @@ function renderTableEditable(el, json, { sortAZ, showUnits }, onCommit) {
     const csv = rows.map(r => r.map(x => /[",\n]/.test(x) ? `"${x.replace(/"/g,'""')}"` : x).join(',')).join('\n');
     try { await navigator.clipboard.writeText(csv); new Notice('CSV copied'); } catch { new Notice('Copy failed'); }
   });
-
-  return { readFromTable };
 }
 
 // --- plugin ---
@@ -257,7 +330,6 @@ module.exports = class FusionParamsPlugin extends Plugin {
 
     injectStyles();
 
-    // Template command + context menu
     const insertTemplate = async (editor, view) => {
       const file = this.app.workspace.getActiveFile();
       const base = file ? (file.basename || 'Part') : 'Part';
@@ -289,7 +361,7 @@ module.exports = class FusionParamsPlugin extends Plugin {
         const parsed = parseBlock(src);
         const json = toJson(parsed, this.settings.defaultUnit);
 
-        // File JSON (strip UI flags)
+        // Write JSON (strip UI flags)
         const fileJson = {
           design: json.design,
           defaultUnit: json.defaultUnit,
@@ -308,7 +380,7 @@ module.exports = class FusionParamsPlugin extends Plugin {
           recentExports.set(outRelPath, { hash: hashString(pretty), t: now });
           text = `Updated → ${outRelPath}`;
           setTimeout(() => { status.setText(`No changes pending → ${outRelPath}`); }, 3000);
-        } else if (recent && (now - recent.t) < RECENT_WINDOW_MS) {
+        } else if (recent && (now - recent.t) < 4000) {
           text = `Updated just now → ${outRelPath}`;
           setTimeout(() => { status.setText(`No changes pending → ${outRelPath}`); }, 2500);
         } else {
@@ -317,7 +389,7 @@ module.exports = class FusionParamsPlugin extends Plugin {
         status.setText(text);
         if (this.settings.alwaysNotify) new Notice(text);
 
-        // Two-way writeback on Enter only
+        // Two-way writeback
         const section = ctx.getSectionInfo(el);
         const file = this.app.workspace.getActiveFile();
         const applyWriteback = async (newParams) => {
@@ -327,9 +399,7 @@ module.exports = class FusionParamsPlugin extends Plugin {
           const data = await this.app.vault.read(file);
           const next = safeReplaceSection(data, section.lineStart, section.lineEnd, newBlock);
           if (next.trim() === data.trim()) return;
-          writebackGuard = true;
           await this.app.vault.modify(file, next);
-          setTimeout(()=>{ writebackGuard = false; }, 400);
         };
 
         renderTableEditable(el, json, { sortAZ: this.settings.sortAZ, showUnits: this.settings.showUnits }, applyWriteback);
@@ -339,10 +409,6 @@ module.exports = class FusionParamsPlugin extends Plugin {
         new Notice(`Failed to process fusion-params: ${e.message || e}`);
       }
     });
-
-    this.registerEvent(this.app.vault.on('modify', (file) => {
-      if (writebackGuard) { /* ignore own writes */ }
-    }));
 
     this.addSettingTab(new FusionParamsSettingTab(this.app, this));
   }

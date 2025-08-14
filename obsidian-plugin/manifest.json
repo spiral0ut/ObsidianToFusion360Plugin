@@ -1,9 +1,9 @@
 {
   "id": "fusion-params-sync",
   "name": "Fusion 360 Params Sync",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "minAppVersion": "1.2.0",
-  "description": "Fusion 360 parameter sync with editable table, Enter-to-save, and fixed output folder.",
+  "description": "Fusion 360 parameter sync with inline row insert, Enter-to-insert-below, and per-row +/check/trash actions.",
   "author": "You",
   "isDesktopOnly": true
 }
