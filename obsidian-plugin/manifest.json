@@ -1,9 +1,9 @@
 {
   "id": "fusion-params-sync",
   "name": "Fusion 360 Params Sync",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "minAppVersion": "1.2.0",
-  "description": "Fusion 360 parameter sync with editable table, centered status, and optional tolerance preview per row.",
+  "description": "Sync Fusion 360 parameter JSON with comments, inline validation, tolerance preview, and in-note JSON import.",
   "author": "You",
   "isDesktopOnly": true
 }
