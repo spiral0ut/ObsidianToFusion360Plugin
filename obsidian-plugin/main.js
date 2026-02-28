@@ -131,6 +131,11 @@ class FusionParamsSettingTab extends PluginSettingTab {
       .addToggle(t=>t.setValue(this.plugin.settings.alwaysNotify)
         .onChange(async v=>{ this.plugin.settings.alwaysNotify=v; await this.plugin.saveSettings(); }));
 
+    new Setting(containerEl).setName('Sync from Fusion 360')
+      .setDesc('When Fusion 360 exports parameters to JSON, automatically update the associated note\'s fusion-params block.')
+      .addToggle(t=>t.setValue(this.plugin.settings.enableWriteBack)
+        .onChange(async v=>{ this.plugin.settings.enableWriteBack=v; await this.plugin.saveSettings(); }));
+
     new Setting(containerEl).setName('Sort parameters A→Z')
       .setDesc('Order table by name.')
       .addToggle(t=>t.setValue(this.plugin.settings.sortAZ)
@@ -495,6 +500,7 @@ module.exports = class FusionParamsPlugin extends Plugin {
       alwaysNotify: false,
       sortAZ: true,
       showUnits: true,
+      enableWriteBack: true,
       // tolerance
       enableTolerance: false,
       defaultToleranceValue: 0.2,
@@ -504,6 +510,15 @@ module.exports = class FusionParamsPlugin extends Plugin {
     }, await this.loadData());
 
     injectStyles();
+
+    // Tracks JSON files we wrote ourselves to avoid re-triggering write-back
+    this._ownWrites = new Set();
+
+    // Watch for JSON files written by Fusion 360 and sync them back to notes
+    this.registerEvent(this.app.vault.on('modify', async (abstractFile) => {
+      if (!this.settings.enableWriteBack) return;
+      await this._syncFusionJsonToNote(abstractFile);
+    }));
 
     // command + context menu
     const insertTemplate = async (editor, view) => {
@@ -556,6 +571,9 @@ module.exports = class FusionParamsPlugin extends Plugin {
         const setStatus = (label) => status.setText(`${label}\n→ ${outRelPath}`);
 
         if (changed) {
+          // Guard: tell the watcher this write came from us, not from Fusion
+          this._ownWrites.add(outRelPath);
+          setTimeout(() => this._ownWrites.delete(outRelPath), 5000);
           recentExports.set(outRelPath, { hash: hashString(pretty), t: now });
           setStatus('Updated');
           setTimeout(() => setStatus('No changes pending'), 3000);
@@ -607,4 +625,66 @@ module.exports = class FusionParamsPlugin extends Plugin {
 
   async onunload() {}
   async saveSettings() { await this.saveData(this.settings); }
+
+  /**
+   * Called when any vault file is modified. If it's a JSON in the params folder
+   * that we didn't write ourselves, treat it as a Fusion 360 write-back and
+   * update the matching note's fusion-params block.
+   */
+  async _syncFusionJsonToNote(abstractFile) {
+    const path = abstractFile.path;
+    if (!path.endsWith('.json')) return;
+    const folder = (this.settings.outputFolder || 'Params').replace(/^\/+|\/+$/g, '');
+    if (!path.startsWith(folder + '/')) return;
+    if (this._ownWrites.has(path)) return;
+
+    const content = await readSafe(this.app.vault.adapter, path);
+    if (!content) return;
+    let jsonData;
+    try { jsonData = JSON.parse(content); } catch { return; }
+    const designName = jsonData.design;
+    if (!designName || !Array.isArray(jsonData.parameters)) return;
+
+    // Find the matching note — fast path: same basename as design name
+    let targetFile = this.app.vault.getMarkdownFiles().find(f => f.basename === designName);
+
+    // Slow path: search all notes for a fusion-params block with matching part:
+    if (!targetFile) {
+      for (const f of this.app.vault.getMarkdownFiles()) {
+        const fc = await this.app.vault.cachedRead(f);
+        if (fc.includes('```fusion-params') && fc.includes(`part: ${designName}`)) {
+          targetFile = f;
+          break;
+        }
+      }
+    }
+
+    if (!targetFile) return; // no matching note — silently skip
+
+    const noteContent = await this.app.vault.read(targetFile);
+    const blockRegex = /```fusion-params\n([\s\S]*?)```/g;
+    let match;
+    while ((match = blockRegex.exec(noteContent)) !== null) {
+      let parsed;
+      try { parsed = parseBlock(match[1]); } catch { continue; }
+      if (parsed.part !== designName) continue;
+
+      // Preserve the existing units header if Fusion didn't export one
+      const effectiveJson = (!jsonData.defaultUnit && parsed.units)
+        ? { ...jsonData, defaultUnit: parsed.units }
+        : jsonData;
+
+      const newBlock = fromJsonToBlock(effectiveJson);
+      const beforeMatch = noteContent.substring(0, match.index);
+      const lineStart = beforeMatch.split('\n').length - 1;
+      const matchLines = match[0].split('\n').length;
+      const lineEnd = lineStart + matchLines - 1;
+      const next = safeReplaceSection(noteContent, lineStart, lineEnd, newBlock);
+      if (next.trim() === noteContent.trim()) return; // no change needed
+
+      await this.app.vault.modify(targetFile, next);
+      new Notice(`Synced "${designName}" from Fusion 360 \u2192 ${targetFile.name}`);
+      return;
+    }
+  }
 };
