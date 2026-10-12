@@ -60,6 +60,87 @@ function roundTo(val, places) {
 }
 
 // ---------- parsing ----------
+const PURE_NUMBER = /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$/;
+const INLINE_UNIT = /^([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*([a-zA-Z°]+)$/;
+// Character checks only; Fusion resolves names, function arity, and unit compatibility.
+const ALLOWED_VALUE = /^[0-9a-zA-Z_°+\-*/%^().,;<>=\s]+$/;
+
+function hasBalancedParens(str) {
+  let depth = 0;
+  for (const ch of str) {
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth < 0) return false;
+    }
+  }
+  return depth === 0;
+}
+
+// Commas and semicolons delimit function arguments, not standalone expressions.
+function hasValidArgumentSeparators(str) {
+  const frames = [];
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    if (ch === '(') {
+      frames.push(/[A-Za-z_][A-Za-z0-9_]*\s*$/.test(str.slice(0, i)));
+    } else if (ch === ')') {
+      frames.pop();
+    } else if (ch === ',' || ch === ';') {
+      if (!frames[frames.length - 1]) return false;
+      const before = str.slice(0, i).trimEnd();
+      const after = str.slice(i + 1).trimStart();
+      if (!before || !after || /[(,;+\-*/%^<>=]$/.test(before) || /^[),;*/%^<>=]/.test(after)) return false;
+    }
+  }
+  return true;
+}
+
+function analyzeValue(value, unit) {
+  const trimmedVal = value.trim();
+  const trimmedUnit = unit.trim();
+  if (!trimmedVal) return { ok: false, field: 'value', message: 'Value required' };
+  if (trimmedUnit && /\s/.test(trimmedUnit)) return { ok: false, field: 'unit', message: 'Unit may not contain spaces' };
+
+  const normalized = trimmedVal.replace(/\s+/g, '');
+  if (PURE_NUMBER.test(normalized)) {
+    const num = Number(trimmedVal);
+    if (!Number.isFinite(num)) return { ok: false, field: 'value', message: 'Invalid number' };
+    return { ok: true, param: { kind: 'number', value: num, unit: trimmedUnit || null, explicitUnit: !!trimmedUnit } };
+  }
+
+  const inline = trimmedVal.match(INLINE_UNIT);
+  if (inline && !trimmedUnit) {
+    const num = Number(inline[1]);
+    if (!Number.isFinite(num)) return { ok: false, field: 'value', message: 'Invalid number' };
+    return { ok: true, param: { kind: 'number', value: num, unit: inline[2], explicitUnit: true } };
+  }
+  if (inline && trimmedUnit) {
+    return { ok: false, field: 'unit', message: 'Move unit to a single column' };
+  }
+
+  if (!ALLOWED_VALUE.test(trimmedVal)) {
+    return { ok: false, field: 'value', message: 'Unsupported character' };
+  }
+  if (!hasBalancedParens(trimmedVal)) {
+    return { ok: false, field: 'value', message: 'Unbalanced parentheses' };
+  }
+  if (/[+\-*/%^<>=]$/.test(trimmedVal)) {
+    return { ok: false, field: 'value', message: 'Ends with operator' };
+  }
+  if (/^[*/%^<>=]/.test(trimmedVal)) {
+    return { ok: false, field: 'value', message: 'Starts with operator' };
+  }
+  if (!hasValidArgumentSeparators(trimmedVal)) {
+    return { ok: false, field: 'value', message: 'Invalid argument separator' };
+  }
+  if (trimmedUnit) {
+    return { ok: false, field: 'unit', message: 'Expressions cannot use Unit column' };
+  }
+
+  return { ok: true, param: { kind: 'expression', expression: trimmedVal } };
+}
+
 function parseBlock(src) {
   src = normalizeSpaces(src);
   const lines = src.split(/\r?\n/);
@@ -105,16 +186,16 @@ function toJson(parsed, fallbackUnit) {
     const comment = String(payload.comment ?? '');
     if (raw === '') continue;
     const asNum = Number(raw);
-    if (!Number.isNaN(asNum)) {
+    if (PURE_NUMBER.test(raw.trim()) && Number.isFinite(asNum)) {
       const base = { name, value: asNum, unit: defaultUnit, _explicitUnit: false, _raw: raw };
       if (comment) base.comment = comment;
       out.parameters.push(base);
       continue;
     }
-    const mUnit = raw.match(/^([0-9.+\-/* ()]+)\s*([a-zA-Z°]+)$/);
+    const mUnit = raw.trim().match(INLINE_UNIT);
     if (mUnit) {
       const num = Number(mUnit[1].trim()), unit = mUnit[2].trim();
-      if (!Number.isNaN(num)) {
+      if (Number.isFinite(num)) {
         const base = { name, value: num, unit, _explicitUnit: true, _raw: raw };
         if (comment) base.comment = comment;
         out.parameters.push(base);
@@ -442,22 +523,6 @@ function renderTableEditable(el, json, opts, onCommit) {
   const tbody = table.createEl('tbody');
 
   const NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-  const PURE_NUMBER = /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?$/;
-  const INLINE_UNIT = /^([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*([^\s]+)$/;
-  const ALLOWED_VALUE = /^[0-9a-zA-Z_+\-*/().\s]+$/;
-
-  function hasBalancedParens(str) {
-    let depth = 0;
-    for (const ch of str) {
-      if (ch === '(') depth++;
-      else if (ch === ')') {
-        depth--;
-        if (depth < 0) return false;
-      }
-    }
-    return depth === 0;
-  }
-
   function setValidity(input, ok, message = '') {
     if (!input) return;
     if (ok) {
@@ -470,48 +535,6 @@ function renderTableEditable(el, json, opts, onCommit) {
       if (message) input.setAttr('title', message);
       else input.removeAttribute('title');
     }
-  }
-
-  function analyzeValue(value, unit) {
-    const trimmedVal = value.trim();
-    const trimmedUnit = unit.trim();
-    if (!trimmedVal) return { ok: false, field: 'value', message: 'Value required' };
-    if (trimmedUnit && /\s/.test(trimmedUnit)) return { ok: false, field: 'unit', message: 'Unit may not contain spaces' };
-
-    const normalized = trimmedVal.replace(/\s+/g, '');
-    if (PURE_NUMBER.test(normalized)) {
-      const num = Number(trimmedVal);
-      if (!Number.isFinite(num)) return { ok: false, field: 'value', message: 'Invalid number' };
-      return { ok: true, param: { kind: 'number', value: num, unit: trimmedUnit || null, explicitUnit: !!trimmedUnit } };
-    }
-
-    const inline = trimmedVal.match(INLINE_UNIT);
-    if (inline && !trimmedUnit) {
-      const num = Number(inline[1]);
-      if (!Number.isFinite(num)) return { ok: false, field: 'value', message: 'Invalid number' };
-      return { ok: true, param: { kind: 'number', value: num, unit: inline[2], explicitUnit: true } };
-    }
-    if (inline && trimmedUnit) {
-      return { ok: false, field: 'unit', message: 'Move unit to a single column' };
-    }
-
-    if (!ALLOWED_VALUE.test(trimmedVal)) {
-      return { ok: false, field: 'value', message: 'Unsupported character' };
-    }
-    if (!hasBalancedParens(trimmedVal)) {
-      return { ok: false, field: 'value', message: 'Unbalanced parentheses' };
-    }
-    if (/[+\-*/]$/.test(trimmedVal)) {
-      return { ok: false, field: 'value', message: 'Ends with operator' };
-    }
-    if (/^[*/]/.test(trimmedVal)) {
-      return { ok: false, field: 'value', message: 'Starts with operator' };
-    }
-    if (trimmedUnit) {
-      return { ok: false, field: 'unit', message: 'Expressions cannot use Unit column' };
-    }
-
-    return { ok: true, param: { kind: 'expression', expression: trimmedVal } };
   }
 
   function getTolValueAndUnit() {

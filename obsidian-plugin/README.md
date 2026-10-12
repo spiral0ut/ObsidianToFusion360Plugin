@@ -32,3 +32,17 @@ Turn ```fusion-params``` code blocks into an interactive table that keeps a Fusi
 - **Tolerance options**: enable the toolbar, default tolerance value/unit, display style, and rounding precision.
 
 The plugin stores settings automatically; use Obsidian’s command palette to discover all available actions.
+
+## Expression validation
+The table performs basic character, parenthesis, and argument-separator checks. It preserves expressions such as `max(width, height)`, `max(width; height)`, `2*width`, `width ^ 2`, and `if(width > height; width; height)`. Put units inside expressions; the separate Unit column is for numeric values.
+
+Fusion remains responsible for resolving parameter names, function arity, and unit compatibility. Autodesk's [Design parameter reference](https://help.autodesk.com/cloudhelp/ENU/Fusion-Model/files/GUID-76272551-3275-46C4-AE4D-10D58B408C20.htm) documents semicolons for multiargument functions and `round(expr)` with one argument. Accepting a comma expression or `round(value, 3)` here preserves the input; it does not certify that Fusion will evaluate it.
+
+## Regression tests
+From the repository root, run with Node.js 18 or newer:
+
+```sh
+node --test obsidian-plugin/tests/*.test.js
+```
+
+No dependencies or build step are required. Tests load the shipped `main.js` with Obsidian/DOM test doubles and cover expression classification, invalid input, table edits and saves, CSV quoting, and JSON/Markdown round trips. They do not run the Fusion application.
